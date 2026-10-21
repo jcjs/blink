@@ -16,6 +16,7 @@ jobs:
       - name: Select Xcode Version
         run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 
+      # 1. Setup Configuration Templates with Fallbacks
       - name: Setup Configuration Files
         run: |
           if [ -f "template_setup.xcconfig" ]; then
@@ -27,6 +28,7 @@ jobs:
             cp Blink/template_setup.xcconfig Blink/developer_setup.xcconfig
           fi
 
+      # 2. Fetch Precompiled Frameworks & Resources
       - name: Fetch Frameworks and Resources
         run: |
           chmod +x get_frameworks.sh get_resources.sh
@@ -34,37 +36,24 @@ jobs:
           ./get_resources.sh
           rm -rf Blink.xcodeproj/project.xcworkspace/xcshareddata/
 
+      # 3. Resolve SPM Dependencies
       - name: Resolve Package Dependencies
         run: |
           xcodebuild -resolvePackageDependencies -project Blink.xcodeproj -scheme Blink
 
-      # PATCH 1: Bypass Paywall
+      # 4. Patch Paywall / Subscription Check
       - name: Patch Paywall Code
         run: |
           sed -i '' 's/RevenueCat/ //g' Blink/Config/BlinkConfig.swift || true
           find . -type f -name "*.swift" -exec sed -i '' 's/isSubscribed = false/isSubscribed = true/g' {} + || true
 
-      # PATCH 2: Prevent documentStorageURL nil crashes by routing to standard app documents
-      - name: Patch Document Storage Crash
+      # 5. Patch Migration Crash (Neutralizes FileProvider NSFileProviderManager documentStorageURL crash)
+      - name: Patch Migration Crash
         run: |
-          find . -type f -name "*.swift" -exec sed -i '' 's/FileManager.default.url(forUbiquityContainerIdentifier: nil)/FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first/g' {} + || true
+          find . -type f -name "*.swift" -exec sed -i '' 's/Blink8Migrator.perform()/print("Blink8Migrator bypassed")/g' {} + || true
+          find . -type f -name "*.swift" -exec sed -i '' 's/static func perform(/static func performBypassed(/g' {} + || true
 
-      # CREATE CLEAN ENTITLEMENTS: Strips out restricted iCloud/AppGroup requirements
-      - name: Create Clean Entitlements
-        run: |
-          cat << 'EOF' > ExportOptions.plist
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>keychain-access-groups</key>
-              <array>
-                  <string>$(AppIdentifierPrefix)com.blinksh.blink</string>
-              </array>
-          </dict>
-          </plist>
-          EOF
-
+      # 6. Build Unsigned iOS App
       - name: Build Unsigned App for iOS
         run: |
           xcodebuild -project Blink.xcodeproj \
@@ -76,14 +65,17 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             -derivedDataPath build
 
+      # 7. Package into .ipa Format
       - name: Package App into .ipa Format
         run: |
           mkdir -p Payload
           cp -r build/Build/Products/Release-iphoneos/Blink.app Payload/
           zip -r Blink-Shell-Unlocked.ipa Payload
 
+      # 8. Upload Build Artifact
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Blink-Shell-Unlocked-IPA
           path: Blink-Shell-Unlocked.ipa
+          
