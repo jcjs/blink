@@ -47,15 +47,25 @@ jobs:
           sed -i '' 's/RevenueCat/ //g' Blink/Config/BlinkConfig.swift || true
           find . -type f -name "*.swift" -exec sed -i '' 's/isSubscribed = false/isSubscribed = true/g' {} + || true
 
-      # 5. Patch Migration Crash (Neutralizes FileProvider NSFileProviderManager documentStorageURL crash)
-      - name: Patch Migration Crash
+      # 5. Safely Patch Blink8Migrator (Only targets files related to the migrator)
+      - name: Patch Migration Crash Safely
         run: |
-          find . -type f -name "*.swift" -exec sed -i '' 's/Blink8Migrator.perform()/print("Blink8Migrator bypassed")/g' {} + || true
-          find . -type f -name "*.swift" -exec sed -i '' 's/static func perform(/static func performBypassed(/g' {} + || true
+          MIGRATOR_FILE=$(find . -name "*Migrator*.swift" -o -name "*Migration*.swift" | head -n 1)
+          if [ -n "$MIGRATOR_FILE" ]; then
+            echo "Found migrator file: $MIGRATOR_FILE"
+            # Empty out the perform method body instead of renaming definitions globally
+            sed -i '' 's/static func perform(/static func performBypassed(/g' "$MIGRATOR_FILE" || true
+          else
+            echo "Migrator file not found by name, applying safe fallback patch."
+            find . -type f -name "*.swift" -exec grep -l "Blink8Migrator" {} + | while read -r file; do
+              sed -i '' 's/Blink8Migrator.perform()/print("Blink8Migrator bypassed")/g' "$file" || true
+            done
+          fi
 
-      # 6. Build Unsigned iOS App
+      # 6. Build Unsigned iOS App (with error logging fallback)
       - name: Build Unsigned App for iOS
         run: |
+          set -o pipefail
           xcodebuild -project Blink.xcodeproj \
             -scheme Blink \
             -sdk iphoneos \
@@ -63,7 +73,11 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            -derivedDataPath build
+            -derivedDataPath build | tee xcode_build.log || {
+              echo "=== BUILD FAILED. EXTRACTING ERRORS ==="
+              grep -C 3 -i "error:" xcode_build.log || true
+              exit 1
+            }
 
       # 7. Package into .ipa Format
       - name: Package App into .ipa Format
