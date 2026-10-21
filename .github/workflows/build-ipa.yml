@@ -41,28 +41,33 @@ jobs:
         run: |
           xcodebuild -resolvePackageDependencies -project Blink.xcodeproj -scheme Blink
 
-      # 4. Patch Paywall / Subscription Check
+      # 4. Patch Paywall
       - name: Patch Paywall Code
         run: |
           sed -i '' 's/RevenueCat/ //g' Blink/Config/BlinkConfig.swift || true
           find . -type f -name "*.swift" -exec sed -i '' 's/isSubscribed = false/isSubscribed = true/g' {} + || true
 
-      # 5. Safely Patch Blink8Migrator (Only targets files related to the migrator)
-      - name: Patch Migration Crash Safely
+      # 5. Bulletproof Python Patch: Completely Neutralize Blink8Migrator Logic
+      - name: Kill Blink8Migrator Execution
         run: |
-          MIGRATOR_FILE=$(find . -name "*Migrator*.swift" -o -name "*Migration*.swift" | head -n 1)
-          if [ -n "$MIGRATOR_FILE" ]; then
-            echo "Found migrator file: $MIGRATOR_FILE"
-            # Empty out the perform method body instead of renaming definitions globally
-            sed -i '' 's/static func perform(/static func performBypassed(/g' "$MIGRATOR_FILE" || true
-          else
-            echo "Migrator file not found by name, applying safe fallback patch."
-            find . -type f -name "*.swift" -exec grep -l "Blink8Migrator" {} + | while read -r file; do
-              sed -i '' 's/Blink8Migrator.perform()/print("Blink8Migrator bypassed")/g' "$file" || true
-            done
-          fi
+          python3 -c '
+          import glob, re
+          for filepath in glob.glob("**/*.swift", recursive=True):
+              try:
+                  with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                      content = f.read()
+                  if "Blink8Migrator" in content or "MigrationFileProvider" in content:
+                      # Completely stub out perform methods to prevent any NSFileProviderManager calls
+                      content = re.sub(r"static func perform\([^)]*\)\s*\{[^}]*\}", "static func perform(steps: [Any] = []) { print(\"Migrator disabled safely\") }", content)
+                      content = re.sub(r"static func perform\(\)\s*\{[^}]*\}", "static func perform() { print(\"Migrator disabled safely\") }", content)
+                      with open(filepath, "w", encoding="utf-8") as f:
+                          f.write(content)
+                      print(f"Successfully gutted migrator in: {filepath}")
+              except Exception as e:
+                  print(f"Skipped {filepath}: {e}")
+          '
 
-      # 6. Build Unsigned iOS App (with error logging fallback)
+      # 6. Build Unsigned iOS App
       - name: Build Unsigned App for iOS
         run: |
           set -o pipefail
@@ -79,11 +84,14 @@ jobs:
               exit 1
             }
 
-      # 7. Package into .ipa Format
-      - name: Package App into .ipa Format
+      # 7. Package into .ipa & Strip Plug-ins
+      - name: Package and Strip Extensions
         run: |
           mkdir -p Payload
           cp -r build/Build/Products/Release-iphoneos/Blink.app Payload/
+          rm -rf Payload/Blink.app/PlugIns || true
+          rm -rf Payload/Blink.app/Extensions || true
+          rm -rf Payload/Blink.app/Frameworks/*.appex || true
           zip -r Blink-Shell-Unlocked.ipa Payload
 
       # 8. Upload Build Artifact
@@ -92,4 +100,3 @@ jobs:
         with:
           name: Blink-Shell-Unlocked-IPA
           path: Blink-Shell-Unlocked.ipa
-          
