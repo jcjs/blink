@@ -1,0 +1,52 @@
+name: Build Unlocked Blink IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-blink:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Select Xcode Version
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Fetch Frameworks and Resources
+        run: |
+          chmod +x get_frameworks.sh get_resources.sh
+          ./get_frameworks.sh
+          ./get_resources.sh
+
+      # PATCH STEP: Disables RevenueCat paywall check in source code
+      - name: Patch Paywall Code
+        run: |
+          sed -i '' 's/RevenueCat/ //g' Blink/Config/BlinkConfig.swift || true
+          find . -type f -name "*.swift" -exec sed -i '' 's/isSubscribed = false/isSubscribed = true/g' {} + || true
+
+      - name: Build Unsigned App for iOS
+        run: |
+          xcodebuild -project Blink.xcodeproj \
+            -scheme Blink \
+            -sdk iphoneos \
+            -configuration Release \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            -derivedDataPath build
+
+      - name: Package App into .ipa Format
+        run: |
+          mkdir -p Payload
+          cp -r build/Build/Products/Release-iphoneos/Blink.app Payload/
+          zip -r Blink-Shell-Unlocked.ipa Payload
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Blink-Shell-Unlocked-IPA
+          path: Blink-Shell-Unlocked.ipa
