@@ -1,75 +1,33 @@
-name: Build Unlocked Blink IPA
+name: Build Blink Shell via GPL-Builder Script
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-blink:
+  build:
     runs-on: macos-latest
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout GPL-Builder Repository
         uses: actions/checkout@v4
         with:
-          repository: blinksh/blink
-          ref: v18.4.2
-          submodules: recursive
+          repository: NewsGuyTor/Blink-Shell-GPL-Builder
 
       - name: Select Xcode Version
         run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 
-      - name: Setup Configuration Files
+      - name: Install Script Dependencies
         run: |
-          if [ -f "template_setup.xcconfig" ]; then
-            cp template_setup.xcconfig developer_setup.xcconfig
-          else
-            echo "DEVELOPMENT_TEAM =" > developer_setup.xcconfig
-          fi
-          if [ -f "Blink/template_setup.xcconfig" ]; then
-            cp Blink/template_setup.xcconfig Blink/developer_setup.xcconfig
-          fi
+          brew install jq
 
-      - name: Fetch Frameworks and Resources
+      - name: Execute GPL-Builder Script
         run: |
-          chmod +x get_frameworks.sh get_resources.sh
-          ./get_frameworks.sh
-          ./get_resources.sh
-          rm -rf Blink.xcodeproj/project.xcworkspace/xcshareddata/
+          chmod +x build-blink-shell-gpl.sh
+          ./build-blink-shell-gpl.sh
 
-      - name: Resolve Package Dependencies
-        run: |
-          xcodebuild -resolvePackageDependencies -project Blink.xcodeproj -scheme Blink
-
-      - name: Patch Paywall Code
-        run: |
-          sed -i '' 's/RevenueCat/ //g' Blink/Config/BlinkConfig.swift || true
-          find . -type f -name "*.swift" -exec sed -i '' 's/isSubscribed = false/isSubscribed = true/g' {} + || true
-
-      - name: Build Unsigned App for iOS
-        run: |
-          set -o pipefail
-          xcodebuild -project Blink.xcodeproj \
-            -scheme Blink \
-            -sdk iphoneos \
-            -configuration Release \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            -derivedDataPath build | tee xcode_build.log || {
-              echo "=== BUILD FAILED. EXTRACTING ERRORS ==="
-              grep -C 3 -i "error:" xcode_build.log || true
-              exit 1
-            }
-
-      - name: Package App into .ipa Format
-        run: |
-          mkdir -p Payload
-          cp -r build/Build/Products/Release-iphoneos/Blink.app Payload/
-          zip -r Blink-Shell-Unlocked.ipa Payload
-
-      - name: Upload Artifact
+      - name: Upload Generated IPA Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Blink-Shell-Unlocked-IPA
-          path: Blink-Shell-Unlocked.ipa
+          name: Blink-unsigned-v18.4.2
+          path: dist/*.ipa
           
