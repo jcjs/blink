@@ -23,11 +23,19 @@ jobs:
       - name: Execute GPL-Builder Script
         run: |
           chmod +x build-blink-shell-gpl.sh
-          ./build-blink-shell-gpl.sh
+          # Run the script, and if it fails, output the build log for debugging
+          ./build-blink-shell-gpl.sh --clean || {
+            echo "=== SCRIPT FAILED. PRINTING BUILD LOG ==="
+            if [ -f "build-output/build.log" ]; then
+              cat build-output/build.log
+            else
+              echo "build-output/build.log not found."
+            fi
+            exit 1
+          }
 
       - name: Upload Generated IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Blink-unsigned-v18.4.2
           path: dist/*.ipa
-          
