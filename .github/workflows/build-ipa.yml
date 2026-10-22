@@ -24,12 +24,22 @@ jobs:
         run: |
           chmod +x build-blink-shell-gpl.sh
           
-          # Clear corrupted Swift PM cache that causes Xcode parse errors
+          # Wipe local Xcode caches
           rm -rf ~/Library/Caches/org.swift.swiftpm
           rm -rf ~/Library/Developer/Xcode/DerivedData
           
-          # Run the script with overwrite and clean flags to force a fresh, uncorrupted clone
-          ./build-blink-shell-gpl.sh --overwrite --clean || {
+          # Run the script with overwrite and clean flags to pull a fresh copy
+          ./build-blink-shell-gpl.sh --overwrite --clean || true
+
+          # CRITICAL FIX: Find and delete any empty (0-byte) or corrupted JSON/resolved files 
+          # that trigger Xcode error 3840
+          if [ -d "blink-src" ]; then
+            echo "Purging corrupted or empty JSON/resolved files in project..."
+            find blink-src -type f \( -name "*.resolved" -o -name "*.json" -o -size 0 \) -delete || true
+          fi
+
+          # Run the build again now that the workspace is clean
+          ./build-blink-shell-gpl.sh --clean || {
             echo "=== SCRIPT FAILED. PRINTING BUILD LOG ==="
             if [ -f "build-output/build.log" ]; then
               cat build-output/build.log
@@ -44,3 +54,4 @@ jobs:
         with:
           name: Blink-unsigned-v18.4.2
           path: dist/*.ipa
+          
