@@ -20,11 +20,16 @@ jobs:
         run: |
           brew install jq
 
-      - name: Execute GPL-Builder Script
+      - name: Execute GPL-Builder Script Safely
         run: |
           chmod +x build-blink-shell-gpl.sh
-          # Run the script, and if it fails, output the build log for debugging
-          ./build-blink-shell-gpl.sh --clean || {
+          
+          # Clear corrupted Swift PM cache that causes Xcode parse errors
+          rm -rf ~/Library/Caches/org.swift.swiftpm
+          rm -rf ~/Library/Developer/Xcode/DerivedData
+          
+          # Run the script with overwrite and clean flags to force a fresh, uncorrupted clone
+          ./build-blink-shell-gpl.sh --overwrite --clean || {
             echo "=== SCRIPT FAILED. PRINTING BUILD LOG ==="
             if [ -f "build-output/build.log" ]; then
               cat build-output/build.log
