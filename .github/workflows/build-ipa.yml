@@ -20,24 +20,29 @@ jobs:
         run: |
           brew install jq
 
-      - name: Execute GPL-Builder Script for v18.4.2
+      - name: Setup Source and Initialize Submodules
         run: |
           chmod +x build-blink-shell-gpl.sh
           
-          # Wipe corrupted caches
+          # Clear local caches
           rm -rf ~/Library/Caches/org.swift.swiftpm
           rm -rf ~/Library/Developer/Xcode/DerivedData
           
-          # Run setup phase for the actual v18.4.2 tag
-          ./build-blink-shell-gpl.sh --version v18.4.2 --setup-only --overwrite
+          # Step 1: Let the script clone the source repository (setup-only)
+          ./build-blink-shell-gpl.sh --setup-only --overwrite
           
-          # Pre-resolve SPM packages explicitly with diagnostic output, allowing offline fallback
-          cd blink-src
-          xcodebuild -resolvePackageDependencies -project Blink.xcodeproj -scheme Blink || true
-          cd ..
+          # Step 2: CRITICAL - Recursively pull all missing submodules so Xcode finds valid local packages
+          if [ -d "blink-src" ]; then
+            echo "Initializing and updating git submodules recursively..."
+            cd blink-src
+            git submodule update --init --recursive
+            cd ..
+          fi
 
-          # Run the final build
-          ./build-blink-shell-gpl.sh --version v18.4.2 --clean || {
+      - name: Execute Build Phase
+        run: |
+          # Step 3: Run the build with the fully populated source tree
+          ./build-blink-shell-gpl.sh --clean || {
             echo "=== SCRIPT FAILED. PRINTING BUILD LOG ==="
             if [ -f "build-output/build.log" ]; then
               cat build-output/build.log
