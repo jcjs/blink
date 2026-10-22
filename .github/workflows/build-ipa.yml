@@ -1,52 +1,430 @@
-name: Build Blink Shell via GPL-Builder Script
+# Commit this as .github/workflows/build-blink.yml in
+# NewsGuyTor/Blink-Shell-GPL-Builder. It runs build-blink-shell-gpl.sh
+# unchanged.
+#
+# Two failures this is built for:
+#
+# 1. Hangs while "Fetching" / "Downloading".
+#    Hosted runners share an IP. Unauthenticated GitHub allows 60 API
+#    requests/hour. `swift package resolve` (xcfs has ~18 binary
+#    xcframeworks plus git pins) blows past that, then SwiftPM and git
+#    sit in retry/backoff until the job is killed. It looks like a hang.
+#    Fix: send GITHUB_TOKEN (1000/hour) on git, curl, and SwiftPM.
+#    Also fail a transfer that goes silent for 60s instead of waiting
+#    hours, and cap resolve at 20 minutes with one retry.
+#
+# 2. "JSON text did not start with array or object".
+#    That is an EMPTY file, not a schema mismatch. Resolve opens
+#    Package.resolved, gets rate-limited or killed mid-write, and leaves
+#    it zero bytes. The script then ignores a failed resolve (`grep || true`)
+#    and the next xcodebuild decodes the empty file and crashes.
+#    Fix: before every swift/xcodebuild, delete a resolved file that is
+#    empty or does not start with '{', and do the same for empty SwiftPM
+#    cache JSON. blink v18.4.2 also commits xcfs/Package.resolved as
+#    schema version 1, which Xcode 16 rejects next — those are removed too.
+#
+# Do not switch this job to macos-latest. That label is macOS 26, and
+# Xcode 26's SwiftPM blocks forever in a keychain lookup while
+# authorizing a binary download (actions/runner-images#13175).
+
+name: Build Blink unsigned IPA
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Blink tag or branch to build"
+        required: false
+        default: "v18.4.2"
+        type: string
+      xcode:
+        description: "Xcode version installed on macos-15. Leave at 16.4."
+        required: false
+        default: "16.4"
+        type: string
+  push:
+    branches: [main, master]
+    paths:
+      - "build-blink-shell-gpl.sh"
+      - ".github/workflows/build-blink.yml"
+
+concurrency:
+  group: build-blink-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  BLINK_VERSION: ${{ github.event.inputs.version || 'v18.4.2' }}
+  XCODE_VERSION: ${{ github.event.inputs.xcode || '16.4' }}
+  # Actions sets GITHUB_TOKEN. gh looks at GH_TOKEN first.
+  GH_TOKEN: ${{ github.token }}
+  GIT_TERMINAL_PROMPT: "0"
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+  HOMEBREW_NO_ENV_HINTS: "1"
+  NSUnbufferedIO: "YES"
 
 jobs:
   build:
-    runs-on: macos-latest
+    name: Unsigned IPA
+    runs-on: macos-15
+    timeout-minutes: 150
 
     steps:
-      - name: Checkout GPL-Builder Repository
+      - name: Checkout builder
         uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
         with:
-          repository: NewsGuyTor/Blink-Shell-GPL-Builder
+          xcode-version: ${{ env.XCODE_VERSION }}
 
-      - name: Select Xcode Version
-        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-
-      - name: Install Script Dependencies
+      - name: Accept license and show toolchain
         run: |
-          brew install jq
+          set -euo pipefail
+          sudo xcodebuild -license accept || true
+          sudo xcodebuild -runFirstLaunch
+          xcodebuild -version
+          swift --version
+          xcode-select -p
+          xcrun --sdk iphoneos --show-sdk-path
 
-      - name: Configure Authenticated Git for Dependencies
+      - name: Install jq if needed
         run: |
-          # Force Git to use the GitHub Actions token for all GitHub HTTPS requests
-          git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          set -euo pipefail
+          if ! command -v jq >/dev/null 2>&1; then
+            brew install jq
+          fi
+          jq --version
 
-      - name: Execute GPL-Builder Script for v18.4.2
+      - name: Authenticate GitHub and install tool wrappers
         run: |
-          chmod +x build-blink-shell-gpl.sh
-          
-          # Wipe corrupted local caches
-          rm -rf ~/Library/Caches/org.swift.swiftpm
-          rm -rf ~/Library/Developer/Xcode/DerivedData
-          
-          # Run the build script cleanly
-          ./build-blink-shell-gpl.sh --version v18.4.2 --overwrite --clean || {
-            echo "=== SCRIPT FAILED. PRINTING BUILD LOG ==="
-            if [ -f "build-output/build.log" ]; then
-              cat build-output/build.log
-            else
-              echo "build-output/build.log not found."
-            fi
+          set -euo pipefail
+
+          if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+            echo "GITHUB_TOKEN is empty. Refusing to fetch anonymously (60 req/hour is what stalls this build)."
             exit 1
+          fi
+
+          # System git, authenticated. SwiftPM's built-in git ignores
+          # credential helpers and then either rate-limits or blocks on
+          # the keychain. -scmProvider system (xcodebuild wrapper below)
+          # plus this helper is what actually sends the token.
+          git config --global --unset-all credential.helper || true
+          gh auth setup-git
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git config --global http.version HTTP/1.1
+          # A stalled clone fails after 60s under 1KB/s instead of hanging.
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 60
+          git config --global advice.detachedHead false
+
+          # curl (vim runtime, SideloadFix) and `swift package` both read
+          # ~/.netrc. Host-scoped, so the token is not sent anywhere else.
+          umask 077
+          cat > "$HOME/.netrc" << EOF
+          machine github.com
+          login x-access-token
+          password ${GITHUB_TOKEN}
+          machine api.github.com
+          login x-access-token
+          password ${GITHUB_TOKEN}
+          EOF
+          chmod 600 "$HOME/.netrc"
+
+          # Empty default keychain so a missed netrc lookup cannot pop a
+          # keychain dialog. The login keychain stays on the search list
+          # so codesign still works for the unsigned ad-hoc identity.
+          KEYCHAIN="$RUNNER_TEMP/blink-ci.keychain-db"
+          KEYCHAIN_PASS="$(openssl rand -hex 24)"
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          # Keep the login keychain on the search list so codesign can still
+          # see it. Package fetches are pointed at ~/.netrc instead, which is
+          # what avoids both the rate-limit stall and the keychain hang.
+          existing="$(security list-keychains -d user | sed -e 's/^ *"//' -e 's/"$//')"
+          security list-keychains -d user -s "$KEYCHAIN" $existing
+          security default-keychain -d user -s "$KEYCHAIN"
+          echo "BLINK_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          defaults write com.apple.dt.Xcode IDESkipPackagePluginFingerprintValidatation -bool YES
+          defaults write com.apple.dt.Xcode IDESkipMacroFingerprintValidation -bool YES
+          defaults write com.apple.dt.Xcode IDEPackageSupportUseBuiltinSCM -bool NO
+
+          rm -rf \
+            "$HOME/Library/Caches/org.swift.swiftpm" \
+            "$HOME/Library/org.swift.swiftpm" \
+            "$HOME/Library/Developer/Xcode/DerivedData" \
+            "$HOME/.swiftpm"
+
+          WRAPPER_BIN="$RUNNER_TEMP/bin"
+          mkdir -p "$WRAPPER_BIN"
+
+          cat > "$WRAPPER_BIN/sanitize-package-resolved.py" << 'PY'
+          import json
+          import os
+          import sys
+
+          def classify(path, strict):
+              try:
+                  with open(path, "rb") as fh:
+                      raw = fh.read()
+              except OSError as exc:
+                  return "unreadable ({})".format(exc)
+              if raw.startswith(b"\xef\xbb\xbf"):
+                  raw = raw[3:]
+              stripped = raw.lstrip()
+              if not stripped:
+                  return "empty (JSON text did not start with an object)"
+              first = stripped[:1]
+              if strict:
+                  if first != b"{":
+                      return "does not start with an object (starts with {!r})".format(first.decode("latin1"))
+              elif first not in (b"{", b"["):
+                  return "does not start with an object or array"
+              try:
+                  data = json.loads(stripped)
+              except Exception as exc:
+                  return "invalid json ({})".format(exc.__class__.__name__)
+              if strict:
+                  if not isinstance(data, dict):
+                      return "not a json object"
+                  version = data.get("version")
+                  # v1 is {"object":{"pins":[...]},"version":1} shipped in
+                  # blink xcfs/. Xcode 16 calls it corrupted. v2/v3 have
+                  # top-level "pins" and version >= 2.
+                  if not isinstance(version, int) or version < 2 or "pins" not in data:
+                      return "unusable Package.resolved schema version {!r}".format(version)
+              return None
+
+          check_only = "--check" in sys.argv
+          loose = "--loose" in sys.argv
+          paths = [p for p in sys.argv[1:] if p not in ("--check", "--loose")]
+          failed = False
+          for path in paths:
+              if not os.path.isfile(path):
+                  if check_only:
+                      failed = True
+                      print("missing {}".format(path), file=sys.stderr)
+                  continue
+              strict = os.path.basename(path) == "Package.resolved" and not loose
+              reason = classify(path, strict)
+              if not reason:
+                  continue
+              failed = True
+              if check_only:
+                  print("{}: {}".format(path, reason), file=sys.stderr)
+              else:
+                  print("removing {}: {}".format(path, reason), file=sys.stderr)
+                  try:
+                      os.remove(path)
+                  except OSError as exc:
+                      print("could not remove {}: {}".format(path, exc), file=sys.stderr)
+                      failed = True
+          if check_only and failed:
+              sys.exit(1)
+          PY
+
+          cat > "$WRAPPER_BIN/run-with-timeout.py" << 'PY'
+          import os
+          import signal
+          import subprocess
+          import sys
+
+          seconds = int(sys.argv[1])
+          cmd = sys.argv[2:]
+          proc = subprocess.Popen(cmd, start_new_session=True)
+          try:
+              raise SystemExit(proc.wait(timeout=seconds))
+          except subprocess.TimeoutExpired:
+              os.killpg(proc.pid, signal.SIGKILL)
+              proc.wait()
+              sys.stderr.write("timed out after {}s: {}\n".format(seconds, " ".join(cmd[:3])))
+              raise SystemExit(124)
+          PY
+
+          # get_resources.sh and the SideloadFix fetch call curl with no
+          # --retry and no --fail, so a 403 rate-limit body or an empty
+          # reply is saved as the artifact and the script continues.
+          cat > "$WRAPPER_BIN/curl" << 'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          WRAPPER_BIN="$(cd "$(dirname "$0")" && pwd)"
+          cleaned="$(printf '%s' "$PATH" | tr ':' '\n' | grep -Fxv "$WRAPPER_BIN" | paste -sd ':' - || true)"
+          REAL="$(PATH="$cleaned" command -v curl)"
+          exec "$REAL" \
+            --netrc \
+            --fail \
+            --retry 6 \
+            --retry-all-errors \
+            --retry-delay 5 \
+            --connect-timeout 20 \
+            --speed-limit 1000 \
+            --speed-time 60 \
+            --max-time 900 \
+            "$@"
+          EOF
+
+          # get_frameworks.sh is `cd xcfs && swift package resolve`.
+          # That directory contains the v1 (or empty) Package.resolved.
+          cat > "$WRAPPER_BIN/swift" << 'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          WRAPPER_BIN="$(cd "$(dirname "$0")" && pwd)"
+          cleaned="$(printf '%s' "$PATH" | tr ':' '\n' | grep -Fxv "$WRAPPER_BIN" | paste -sd ':' - || true)"
+          REAL="$(PATH="$cleaned" xcrun --find swift)"
+
+          is_resolve=0
+          prev=""
+          for arg in "$@"; do
+            if [[ "$prev" == "package" && "$arg" == "resolve" ]]; then
+              is_resolve=1
+            fi
+            prev="$arg"
+          done
+          if [[ "$is_resolve" -eq 0 ]]; then
+            exec "$REAL" "$@"
+          fi
+
+          sweep() {
+            python3 "$WRAPPER_BIN/sanitize-package-resolved.py" \
+              "${PWD}/Package.resolved" \
+              "${PWD}/.build/workspace-state.json" || true
+            find "$HOME/Library/Caches/org.swift.swiftpm" "$HOME/Library/org.swift.swiftpm" \
+              -type f \( -name '*.json' -o -name 'Package.resolved' \) -print0 2>/dev/null \
+              | xargs -0 python3 "$WRAPPER_BIN/sanitize-package-resolved.py" --loose || true
           }
 
-      - name: Upload Generated IPA Artifact
+          attempt() {
+            sweep
+            python3 "$WRAPPER_BIN/run-with-timeout.py" 1200 "$REAL" "$@"
+          }
+
+          if attempt "$@"; then
+            if python3 "$WRAPPER_BIN/sanitize-package-resolved.py" --check "${PWD}/Package.resolved"; then
+              exit 0
+            fi
+            echo "swift package resolve exited 0 but Package.resolved is missing, empty, or not an object" >&2
+          fi
+          echo "retrying swift package resolve once after clearing caches" >&2
+          sleep 15
+          rm -rf .build \
+            "$HOME/Library/Caches/org.swift.swiftpm" \
+            "$HOME/Library/org.swift.swiftpm"
+          sweep
+          python3 "$WRAPPER_BIN/run-with-timeout.py" 1200 "$REAL" "$@"
+          python3 "$WRAPPER_BIN/sanitize-package-resolved.py" --check "${PWD}/Package.resolved"
+          EOF
+
+          # Flags go BEFORE the action. The script puts `build` last;
+          # appending -packageAuthorizationProvider after it is a build
+          # setting and xcodebuild errors. resolve is also `|| true` in
+          # the script, so a bad Package.resolved must be removed here,
+          # before the real tool reads it, or the build crashes with
+          # "did not start with an object".
+          cat > "$WRAPPER_BIN/xcodebuild" << 'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          WRAPPER_BIN="$(cd "$(dirname "$0")" && pwd)"
+          cleaned="$(printf '%s' "$PATH" | tr ':' '\n' | grep -Fxv "$WRAPPER_BIN" | paste -sd ':' - || true)"
+          REAL="$(PATH="$cleaned" xcrun --find xcodebuild)"
+
+          for arg in "$@"; do
+            case "$arg" in
+              -version|-showsdks|-license|-runFirstLaunch|-find|-help|-usage|-downloadPlatform|-showBuildSettings)
+                exec "$REAL" "$@"
+                ;;
+            esac
+          done
+
+          RESOLVED_CANDIDATES=(
+            Blink.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+            Blink.xcworkspace/xcshareddata/swiftpm/Package.resolved
+            xcfs/Package.resolved
+            Package.resolved
+          )
+          # Only the project lockfile is what the next build step decodes.
+          # Requiring every candidate to exist makes a good resolve look failed
+          # just because Blink.xcworkspace/ is not there.
+          PROJECT_RESOLVED="Blink.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+          python3 "$WRAPPER_BIN/sanitize-package-resolved.py" "${RESOLVED_CANDIDATES[@]}" || true
+
+          # Prepend. The shell script puts the action (`build`, `clean`)
+          # after build settings; flags appended after `build` are rejected.
+          extra=(-skipPackagePluginValidation -skipMacroValidation -packageAuthorizationProvider netrc -scmProvider system)
+
+          is_resolve=0
+          for arg in "$@"; do
+            if [[ "$arg" == "-resolvePackageDependencies" ]]; then
+              is_resolve=1
+            fi
+          done
+          if [[ "$is_resolve" -eq 0 ]]; then
+            exec "$REAL" "${extra[@]}" "$@"
+          fi
+
+          if python3 "$WRAPPER_BIN/run-with-timeout.py" 1200 "$REAL" "${extra[@]}" "$@"; then
+            if python3 "$WRAPPER_BIN/sanitize-package-resolved.py" --check "$PROJECT_RESOLVED"; then
+              exit 0
+            fi
+            echo "resolve exited 0 but ${PROJECT_RESOLVED} is missing, empty, or not an object" >&2
+          fi
+          echo "retrying xcodebuild -resolvePackageDependencies once" >&2
+          sleep 15
+          rm -rf "$HOME/Library/Caches/org.swift.swiftpm" "$HOME/Library/org.swift.swiftpm"
+          python3 "$WRAPPER_BIN/sanitize-package-resolved.py" "${RESOLVED_CANDIDATES[@]}" || true
+          python3 "$WRAPPER_BIN/run-with-timeout.py" 1200 "$REAL" "${extra[@]}" "$@"
+          python3 "$WRAPPER_BIN/sanitize-package-resolved.py" --check "$PROJECT_RESOLVED"
+          EOF
+
+          chmod +x "$WRAPPER_BIN/curl" "$WRAPPER_BIN/swift" "$WRAPPER_BIN/xcodebuild"
+          echo "$WRAPPER_BIN" >> "$GITHUB_PATH"
+          export PATH="$WRAPPER_BIN:$PATH"
+          hash -r || true
+          [[ "$(command -v curl)" == "$WRAPPER_BIN/curl" ]]
+          [[ "$(command -v swift)" == "$WRAPPER_BIN/swift" ]]
+          [[ "$(command -v xcodebuild)" == "$WRAPPER_BIN/xcodebuild" ]]
+          swift --version
+          xcodebuild -version
+
+      - name: Build unsigned IPA
+        run: |
+          set -euo pipefail
+          chmod +x ./build-blink-shell-gpl.sh
+          mkdir -p build-output
+          # pipefail so tee does not hide a crash inside the script.
+          # On failure the script exits before it deletes build-output/,
+          # and ci.log still has the resolve error if it died in get_frameworks.sh.
+          ./build-blink-shell-gpl.sh --overwrite --clean --version "$BLINK_VERSION" 2>&1 | tee build-output/ci.log
+          find dist -name '*.ipa' -print
+          test -n "$(find dist -name '*.ipa' -print -quit)"
+
+      - name: Upload IPA
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Blink-unsigned-v18.4.2
+          name: Blink-unsigned-${{ env.BLINK_VERSION }}
           path: dist/*.ipa
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_id }}
+          path: |
+            build-output/ci.log
+            build-output/build.log
+          if-no-files-found: ignore
+
+      - name: Drop the temporary keychain
+        if: always()
+        run: |
+          if [[ -n "${BLINK_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$BLINK_KEYCHAIN" || true
+          fi
           
