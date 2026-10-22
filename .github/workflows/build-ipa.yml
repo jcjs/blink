@@ -20,29 +20,21 @@ jobs:
         run: |
           brew install jq
 
-      - name: Setup Source and Initialize Submodules
+      - name: Configure Authenticated Git for Dependencies
+        run: |
+          # Force Git to use the GitHub Actions token for all GitHub HTTPS requests
+          git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Execute GPL-Builder Script for v18.4.2
         run: |
           chmod +x build-blink-shell-gpl.sh
           
-          # Clear local caches
+          # Wipe corrupted local caches
           rm -rf ~/Library/Caches/org.swift.swiftpm
           rm -rf ~/Library/Developer/Xcode/DerivedData
           
-          # Step 1: Let the script clone the source repository (setup-only)
-          ./build-blink-shell-gpl.sh --setup-only --overwrite
-          
-          # Step 2: CRITICAL - Recursively pull all missing submodules so Xcode finds valid local packages
-          if [ -d "blink-src" ]; then
-            echo "Initializing and updating git submodules recursively..."
-            cd blink-src
-            git submodule update --init --recursive
-            cd ..
-          fi
-
-      - name: Execute Build Phase
-        run: |
-          # Step 3: Run the build with the fully populated source tree
-          ./build-blink-shell-gpl.sh --clean || {
+          # Run the build script cleanly
+          ./build-blink-shell-gpl.sh --version v18.4.2 --overwrite --clean || {
             echo "=== SCRIPT FAILED. PRINTING BUILD LOG ==="
             if [ -f "build-output/build.log" ]; then
               cat build-output/build.log
