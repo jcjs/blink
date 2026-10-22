@@ -20,27 +20,24 @@ jobs:
         run: |
           brew install jq
 
-      - name: Setup Source and Purge Corrupted Package Files
+      - name: Execute GPL-Builder Script for v18.4.2
         run: |
           chmod +x build-blink-shell-gpl.sh
           
-          # Clear local Xcode and Swift package caches
+          # Wipe corrupted caches
           rm -rf ~/Library/Caches/org.swift.swiftpm
           rm -rf ~/Library/Developer/Xcode/DerivedData
           
-          # Step 1: Run only the setup/clone phase from the script
-          ./build-blink-shell-gpl.sh --setup-only --overwrite
+          # Run setup phase for the actual v18.4.2 tag
+          ./build-blink-shell-gpl.sh --version v18.4.2 --setup-only --overwrite
           
-          # Step 2: Strip out empty or invalid Package.resolved files causing Xcode Code 3840
-          echo "Purging corrupted or empty Package.resolved files..."
-          find blink-src -name "Package.resolved" -delete || true
-          find blink-src -name "*.resolved" -delete || true
-          find blink-src -type f -name "*.json" -size 0 -delete || true
+          # Pre-resolve SPM packages explicitly with diagnostic output, allowing offline fallback
+          cd blink-src
+          xcodebuild -resolvePackageDependencies -project Blink.xcodeproj -scheme Blink || true
+          cd ..
 
-      - name: Execute Build Phase
-        run: |
-          # Step 3: Run the build using the sanitized source tree
-          ./build-blink-shell-gpl.sh --clean || {
+          # Run the final build
+          ./build-blink-shell-gpl.sh --version v18.4.2 --clean || {
             echo "=== SCRIPT FAILED. PRINTING BUILD LOG ==="
             if [ -f "build-output/build.log" ]; then
               cat build-output/build.log
