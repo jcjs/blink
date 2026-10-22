@@ -112,8 +112,8 @@ jobs:
             echo "Repo → Settings → Actions → General → Workflow permissions:"
             echo "  select 'Read repository contents and packages permissions'."
             echo "If an org policy disables the automatic token, create a classic PAT"
-            echo "(public_repo scope) as the repo secret GH_TOKEN and change this step's"
-            echo "env to: GH_TOKEN: \${{ secrets.GH_TOKEN }}"
+            echo "with the public_repo scope, save it as a repository secret named GH_TOKEN,"
+            echo "and point this step env GH_TOKEN at secrets.GH_TOKEN instead of secrets.GITHUB_TOKEN."
             exit 1
           fi
           TOKEN="$GH_TOKEN"
